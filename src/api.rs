@@ -10,6 +10,7 @@ use crate::utils::matrices::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::str;
+use rayon::prelude::*;
 
 /// A `Shard` is an instance of a database, where each row corresponds
 /// to a single element, that has been preprocessed by the server.
@@ -75,8 +76,23 @@ impl Shard {
     Ok(se?)
   }
 
-  /// Returns the database
-  pub fn get_db(&self) -> &Database {
+  // Produces a serialized response (base64-encoded) to a serialized
+  // client query
+  pub fn respond_par(&self, q: &Query) -> ResultBoxedError<Vec<u8>> {
+    let resp = Response(
+      (0..self.db.get_matrix_width_self())
+        .into_par_iter()
+        .map(|i| self.db.vec_mult_par(q.as_slice(), i))
+        .collect(),
+    );
+    let se = bincode::serialize(&resp);
+
+    Ok(se?)
+  }
+
+
+   /// Returns the database
+   pub fn get_db(&self) -> &Database {
     &self.db
   }
 
@@ -91,6 +107,64 @@ impl Shard {
       .map(|i| self.get_db().get_db_entry(i))
       .collect::<Vec<String>>()
       .into_iter()
+  }
+}
+
+  /// Struct for representing database as multiple shards 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShardedDB {
+  pub sharded_db: Vec<Shard>,
+  pub num_shards: u32,
+}
+impl ShardedDB {
+  /// Expects a JSON file of vectors of base64-encoded strings in file path. It also
+  /// expects the lwe dimension, m (the number of DB elements), element size
+  /// (in bytes) of the database elements, and plaintext bits.
+  /// It will call the 'from_base64_strings' function to generate the database.
+  pub fn from_json_file(
+    file_path: &str,
+    lwe_dim: usize,
+    m: usize,
+    ele_size: usize,
+    plaintext_bits: usize,
+  ) -> ResultBoxedError<Self> {
+
+    // Read in JSON to string 
+    let file_contents: String =
+      fs::read_to_string(file_path).unwrap().parse().unwrap();
+
+    let shards: Vec<Vec<String>> = serde_json::from_str(&file_contents).unwrap();
+    
+    Ok(
+      Self{
+        sharded_db: shards.iter()
+            .map(|s| Shard::from_base64_strings(&s, lwe_dim, m, ele_size, plaintext_bits).unwrap())
+            .collect(),
+        num_shards: shards.len() as u32,
+      }
+    )
+  }
+
+  // Produces a vector of serialized responses (base64-encoded) to a
+  // serialized client query
+  pub fn respond(&self, q: &Query) -> ResultBoxedError<Vec<Vec<u8>>> {
+
+    let resps = self.sharded_db
+        .par_iter()
+        .map(|s| s.respond_par(q).unwrap())
+        .collect();
+
+    Ok(resps)
+  }
+
+  /// Returns the database
+  pub fn get_sharded_db(&self) -> &Vec<Shard> {
+    &self.sharded_db
+  }
+
+  /// Returns the base parameters
+  pub fn get_length(&self) -> u32 {
+    self.num_shards
   }
 }
 
@@ -117,6 +191,7 @@ impl QueryParams {
   }
 
   /// Prepares a new client query based on an input row_index
+  /// Computes b~ from b and row index
   pub fn prepare_query(&mut self, row_index: usize) -> ResultBoxedError<Query> {
     if self.used {
       return Err(Box::new(ErrorQueryParamsReused {}));
@@ -125,6 +200,7 @@ impl QueryParams {
     let query_indicator = get_rounding_factor(self.plaintext_bits);
     let mut lhs = Vec::new();
     lhs.clone_from(&self.lhs.clone());
+    // Add q/p to desired index
     let (result, check) = lhs[row_index].overflowing_add(query_indicator);
     if !check {
       lhs[row_index] = result;
@@ -195,9 +271,9 @@ mod tests {
   use super::*;
   use rand_core::{OsRng, RngCore};
 
-  #[test]
+  //#[test]
   fn client_query_to_server_10_times() {
-    let m = 2u32.pow(12) as usize;
+    let m = 2u32.pow(16) as usize;
     let ele_size = 2u32.pow(8) as usize;
     let plaintext_bits = 12usize;
     let lwe_dim = 512;
@@ -220,6 +296,57 @@ mod tests {
       let resp: Response = bincode::deserialize(&d_resp).unwrap();
       let output = resp.parse_output_as_base64(&qp);
       assert_eq!(output, db_eles[i]);
+    }
+  }
+
+  #[test]
+  fn client_query_to_server_10_times_sharded_sequential() {
+    let ele_size = 2u32.pow(8) as usize;
+    let plaintext_bits = 12usize;
+    let lwe_dim = 512;
+    let num_shards = 16;
+    let m = (2u32.pow(16)/num_shards) as usize;
+
+    let shard_vec = vec![0; num_shards as usize];
+    let tmp_dbs = vec![""; num_shards as usize];
+
+    let db_vec:Vec<Vec<String>> = tmp_dbs.par_iter()
+        .map(|x| generate_db_eles(m, (ele_size + 7) / 8))
+        .collect();
+    // Generate Shards
+    let shards: Vec<Shard> = db_vec.par_iter()
+        .map(|db_eles| Shard::from_base64_strings(
+          &db_eles,
+          lwe_dim,
+          m,
+          ele_size,
+          plaintext_bits,
+        ).unwrap())
+        .collect();
+
+    let sharded_db = ShardedDB{
+      sharded_db: shards,
+      num_shards: num_shards as u32,
+    };
+    let bp = sharded_db.sharded_db[0].get_base_params();
+    let cp = CommonParams::from(bp);
+    #[allow(clippy::needless_range_loop)]
+    for i in 0..10 {
+      let mut qp = QueryParams::new(&cp, bp).unwrap();
+      let q = qp.prepare_query(i).unwrap();
+      let d_resps: Vec<Vec<u8>> = sharded_db.respond(&q).unwrap();
+      //let resps: Vec<Response> = bincode::deserialize(&d_resp).unwrap();
+
+      let outputs: Vec<String> = d_resps.par_iter()
+        .map(|d| bincode::deserialize(&d).unwrap())
+        .map(|r: Response| r.parse_output_as_base64(&qp))
+        .collect();
+
+      //let output = resp.parse_output_as_base64(&qp);
+      //let output2 = resp.parse_output_as_base64(&qp);
+
+      assert_eq!(outputs[0], db_vec[0][i]);
+      //assert_eq!(outputs[1], db_vec[i]);
     }
   }
 

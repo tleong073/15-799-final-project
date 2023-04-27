@@ -6,11 +6,11 @@ PREVIOUS_DIR=..
 
 # cargo build values
 # these are the FrodoPIR parameters to be used for benchmarking
-MATRIX_HEIGHT_EXP=16
+MATRIX_HEIGHT_EXP=17
 LWE_DIMENSION=1572
-ELEMENT_SIZE_EXP=13
-PLAINTEXT_SIZE_EXP=10
-NUM_SHARDS=8
+ELEMENT_SIZE_EXP=16
+PLAINTEXT_SIZE_EXP=16
+NUM_SHARDS=5
 
 # rust flags
 RUST_BACKTRACE=1
@@ -42,7 +42,7 @@ gen-db:
 build:
 	${CARGO_COMMAND} build
 test:
-	${CARGO_COMMAND} test -- --nocapture
+	${PIR_ENV} ${CARGO_COMMAND} test -- --nocapture
 
 LOOPS = 100
 test-loop:

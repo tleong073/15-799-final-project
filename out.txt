@@ -1,0 +1,12 @@
+
+running 2 tests
+test api::tests::client_query_to_server_attempt_params_reuse ... ok
+test api::tests::client_query_to_server_10_times_sharded_sequential ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

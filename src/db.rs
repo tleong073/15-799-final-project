@@ -1,6 +1,8 @@
 use std::fs;
 use std::io::BufReader;
 
+
+
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -9,9 +11,25 @@ use crate::errors::ResultBoxedError;
 use crate::utils::format::*;
 use crate::utils::matrices::*;
 
+extern crate openblas_src;
+
+use rayon::prelude::*;
+use ndarray::*;
+
+pub fn transpose<T>(v: &Vec<Vec<T>>) -> Vec<Vec<T>>
+where
+    T: Clone,
+{
+    assert!(!v.is_empty());
+    (0..v[0].len())
+        .map(|i| v.iter().map(|inner| inner[i].clone()).collect::<Vec<T>>())
+        .collect()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Database {
   entries: Vec<Vec<u32>>,
+  entries_T: Vec<Vec<u32>>,
   m: usize,
   ele_size: usize,
   plaintext_bits: usize,
@@ -23,13 +41,17 @@ impl Database {
     ele_size: usize,
     plaintext_bits: usize,
   ) -> ResultBoxedError<Self> {
+    let ent = swap_matrix_fmt(&construct_rows(
+      elements,
+      m,
+      ele_size,
+      plaintext_bits,
+    )?);
+    let ent_T = transpose(&ent);
+    //panic!("asdsad {} {} \n",ent[0].len(),ent_T.len());
     Ok(Self {
-      entries: swap_matrix_fmt(&construct_rows(
-        elements,
-        m,
-        ele_size,
-        plaintext_bits,
-      )?),
+      entries: ent,
+      entries_T: ent_T,
       m,
       ele_size,
       plaintext_bits,
@@ -51,12 +73,29 @@ impl Database {
     self.entries = swap_matrix_fmt(&self.entries);
   }
 
+  // Multiply row vector by DB matrix and return result
+  // Useful for matrix multiplication
   pub fn vec_mult(&self, row: &[u32], col_idx: usize) -> u32 {
     let mut acc = 0u32;
     for (i, entry) in row.iter().enumerate() {
       acc = acc.wrapping_add(entry.wrapping_mul(self.entries[col_idx][i]));
     }
     acc
+  }
+
+  pub fn vec_mult_par(&self, row: &[u32], col_idx: usize) -> u32 {
+    let mut acc = 0u32;
+    let col = &self.entries[col_idx];
+    let q_arr = ArrayView::from(row);
+    let col_arr = ArrayView::from(col);
+    //println!("col size: {}",col_arr.len());
+    //panic!("asdsad {} \n",col.len());
+    let mut res: u32 = 0;
+    unsafe {
+      res = q_arr.dot(&col_arr);
+    }
+    
+    res
   }
 
   pub fn write_to_file(&self, path: &str) -> ResultBoxedError<()> {
@@ -169,6 +208,7 @@ impl BaseParams {
   }
 
   /// Computes s*(A*DB) using the RHS of the public parameters
+  /// Useful for computing c on the client side
   pub fn mult_right(&self, s: &[u32]) -> ResultBoxedError<Vec<u32>> {
     let cols = &self.rhs;
     (0..cols.len())
@@ -206,6 +246,7 @@ impl CommonParams {
 
   /// Computes s*A + e using the seed used to generate the LHS matrix of
   /// the public parameters
+  /// Computes b
   pub fn mult_left(&self, s: &[u32]) -> ResultBoxedError<Vec<u32>> {
     let cols = self.as_matrix();
     (0..cols.len())
